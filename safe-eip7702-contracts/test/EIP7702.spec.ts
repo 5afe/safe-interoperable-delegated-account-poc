@@ -41,67 +41,74 @@ describe("EIP7702", () => {
     });
 
     const assertEmptyAccountStorage = async (account: AddressLike) => {
-        expect(await ethers.provider.getStorage(account, FALLBACK_HANDLER_STORAGE_SLOT)).to.equal(ethers.ZeroHash);
-        expect(await ethers.provider.getStorage(account, GUARD_STORAGE_SLOT)).to.equal(ethers.ZeroHash);
+        const provider = ethers.provider;
+        expect(await provider.getStorage(account, FALLBACK_HANDLER_STORAGE_SLOT)).to.equal(ethers.ZeroHash);
+        expect(await provider.getStorage(account, GUARD_STORAGE_SLOT)).to.equal(ethers.ZeroHash);
 
         // Singleton address
-        expect(await ethers.provider.getStorage(account, 0)).to.equal(ethers.ZeroHash);
+        expect(await provider.getStorage(account, 0)).to.equal(ethers.ZeroHash);
         // Owner count
-        expect(await ethers.provider.getStorage(account, 3)).to.equal(ethers.ZeroHash);
+        expect(await provider.getStorage(account, 3)).to.equal(ethers.ZeroHash);
         // Threshold
-        expect(await ethers.provider.getStorage(account, 4)).to.equal(ethers.ZeroHash);
+        expect(await provider.getStorage(account, 4)).to.equal(ethers.ZeroHash);
 
-        expect(await readModuleStorageSlot(ethers.provider, account, SENTINEL_ADDRESS)).to.equal(ethers.ZeroHash);
-        expect(await readOwnerStorageSlot(ethers.provider, account, SENTINEL_ADDRESS)).to.equal(ethers.ZeroHash);
+        expect(await readModuleStorageSlot(provider, account, SENTINEL_ADDRESS)).to.equal(ethers.ZeroHash);
+        expect(await readOwnerStorageSlot(provider, account, SENTINEL_ADDRESS)).to.equal(ethers.ZeroHash);
     };
 
     describe("Test SafeEIP7702Proxy", function () {
-        it("Give authority to SafeEIP7702Proxy", async () => {
+        it.only("Give authority to SafeEIP7702Proxy", async () => {
             const { safeSingleton, fallbackHandler, relayer, deployer, delegator, safeModuleSetup, safeEIP7702ProxyFactory } =
                 await setupTests();
             const pkDelegator = process.env.PK3 || "";
             const pkRelayer = process.env.PK2 || "";
+            const provider = ethers.provider;
 
-            const delegatorSigningKey = new ethers.Wallet(pkDelegator, hre.ethers.provider);
+            const delegatorSigningKey = new ethers.Wallet(pkDelegator, provider);
             const relayerSigningKey = new SigningKey(pkRelayer);
 
-            const chainId = (await ethers.provider.getNetwork()).chainId;
+            const chainId = (await provider.getNetwork()).chainId;
             const authNonce = BigInt(await delegatorSigningKey.getNonce());
 
-            // Deploy SafeProxy
-            const owners = [await deployer.getAddress()];
+            // Deploy SafeProxy with the delegator as owner
+            const owners = [await deployer.getAddress()];            
             const fallbackHandlerAddress = await fallbackHandler.getAddress();
             const data = getSetupData(owners, 1, await safeModuleSetup.getAddress(), [fallbackHandlerAddress], fallbackHandlerAddress);
 
             const proxyAddress = await calculateProxyAddress(safeEIP7702ProxyFactory, await safeSingleton.getAddress(), data, 0);
-            const isContract = (await ethers.provider.getCode(proxyAddress)) === "0x" ? false : true;
+            const isContract = (await provider.getCode(proxyAddress)) === "0x" ? false : true;
 
             if (!isContract) {
                 console.log("Deploying Proxy");
                 await safeEIP7702ProxyFactory.connect(deployer).createProxyWithNonce(await safeSingleton.getAddress(), data, 0);
             } else {
-                console.log("Proxy already deployed");
+                console.log("Proxy already deployed: ", proxyAddress);
             }
 
             const authAddress = proxyAddress;
 
             const authorizationList = getAuthorizationList(chainId, authNonce, pkDelegator, authAddress);
-            const encodedSignedTx = await getSignedTransaction(ethers.provider, relayerSigningKey, authorizationList);
+            const encodedSignedTx = await getSignedTransaction(provider, relayerSigningKey, authorizationList);
 
-            const isAlreadyDelegated = await isAccountDelegatedToAddress(ethers.provider, await delegator.getAddress(), authAddress);
-            if (isAlreadyDelegated) {
-                console.log("Account already delegated to Safe Proxy. Returning");
+            const account = await delegator.getAddress();
+
+            const isAlreadyDelegated = await isAccountDelegatedToAddress(provider, await delegator.getAddress(), authAddress);
+            if (isAlreadyDelegated && (await provider.getStorage(account, 4) == (ethers.zeroPadValue("0x01", 32)))) {
+                console.log("Account already delegated to Safe Proxy and storage is setup. Returning");
                 return;
             }
 
-            const response = await ethers.provider.send("eth_sendRawTransaction", [encodedSignedTx]);
+            const response = await provider.send("eth_sendRawTransaction", [encodedSignedTx]);
             console.log("Set Auth transaction hash", response);
 
             console.log("Waiting for transaction confirmation");
-            const txReceipt = await (await ethers.provider.getTransaction(response))?.wait();
+            const txReceipt = await (await provider.getTransaction(response))?.wait();
 
             expect(txReceipt?.status === 1, "Transaction failed");
-            expect(await isAccountDelegatedToAddress(ethers.provider, await delegator.getAddress(), authAddress)).to.be.true;
+
+            console.log(await delegator.getAddress(), authAddress);
+            console.log(await provider.getCode(account));
+            expect(await isAccountDelegatedToAddress(provider, await delegator.getAddress(), authAddress)).to.be.true;
 
             console.log("Account successfully delegated to Safe Proxy");
 
@@ -109,45 +116,48 @@ describe("EIP7702", () => {
             const txSetupReceipt = await setupTxResponse.wait();
             expect(txSetupReceipt?.status === 1, "Transaction failed");
 
-            const account = await delegator.getAddress();
-            expect(await ethers.provider.getStorage(account, FALLBACK_HANDLER_STORAGE_SLOT)).to.equal(
+            // const account = await delegator.getAddress();
+            expect(await provider.getStorage(account, FALLBACK_HANDLER_STORAGE_SLOT)).to.equal(
                 ethers.zeroPadValue(fallbackHandlerAddress, 32),
             );
-            expect(await ethers.provider.getStorage(account, GUARD_STORAGE_SLOT)).to.equal(ethers.ZeroHash);
+            expect(await provider.getStorage(account, GUARD_STORAGE_SLOT)).to.equal(ethers.ZeroHash);
             // Singleton address
-            expect(await ethers.provider.getStorage(account, 0)).to.equal(ethers.zeroPadValue(await safeSingleton.getAddress(), 32));
+            expect(await provider.getStorage(account, 0)).to.equal(ethers.zeroPadValue(await safeSingleton.getAddress(), 32));
             // Owner count
-            expect(await ethers.provider.getStorage(account, 3)).to.equal(ethers.zeroPadValue("0x01", 32));
+            expect(await provider.getStorage(account, 3)).to.equal(ethers.zeroPadValue("0x01", 32));
             // Threshold
-            expect(await ethers.provider.getStorage(account, 4)).to.equal(ethers.zeroPadValue("0x01", 32));
-            expect(await readModuleStorageSlot(ethers.provider, account, SENTINEL_ADDRESS)).to.equal(
+            expect(await provider.getStorage(account, 4)).to.equal(ethers.zeroPadValue("0x01", 32));
+            expect(await readModuleStorageSlot(provider, account, SENTINEL_ADDRESS)).to.equal(
                 ethers.zeroPadValue(fallbackHandlerAddress, 32),
             );
-            expect(await readOwnerStorageSlot(ethers.provider, account, SENTINEL_ADDRESS)).to.equal(ethers.zeroPadValue(owners[0], 32));
+            expect(await readOwnerStorageSlot(provider, account, SENTINEL_ADDRESS)).to.equal(ethers.zeroPadValue(owners[0], 32));
+
+           // const tx = await execTransaction(relayer, [deployer], await getSafeAtAddress(account), await deployer.getAddress(), "1", "0x", "0");
+           // console.log("Transfer value txHash", (await tx.wait())?.hash);
         });
 
         it("Revoke authority and clear storage", async () => {
             const { relayer, delegator, clearStorageHelper } = await setupTests();
-
+            const provider = ethers.provider;
             const pkDelegator = process.env.PK3 || "";
             const pkRelayer = process.env.PK2 || "";
 
-            const delegatorSigningKey = new ethers.Wallet(pkDelegator, hre.ethers.provider);
+            const delegatorSigningKey = new ethers.Wallet(pkDelegator, provider);
             const relayerSigningKey = new SigningKey(pkRelayer);
 
-            const chainId = (await ethers.provider.getNetwork()).chainId;
+            const chainId = (await provider.getNetwork()).chainId;
             const authNonce = BigInt(await delegatorSigningKey.getNonce());
             const authAddress = await clearStorageHelper.getAddress();
 
             const authorizationList = getAuthorizationList(chainId, authNonce, pkDelegator, authAddress);
-            let encodedSignedTx = await getSignedTransaction(ethers.provider, relayerSigningKey, authorizationList);
+            let encodedSignedTx = await getSignedTransaction(provider, relayerSigningKey, authorizationList);
 
-            const response = await ethers.provider.send("eth_sendRawTransaction", [encodedSignedTx]);
+            const response = await provider.send("eth_sendRawTransaction", [encodedSignedTx]);
             console.log("Transaction hash", response);
-            const txReceipt = await (await ethers.provider.getTransaction(response))?.wait();
+            const txReceipt = await (await provider.getTransaction(response))?.wait();
             expect(txReceipt?.status === 1, "Transaction failed");
 
-            const codeAtEOA = await ethers.provider.getCode(await delegator.getAddress());
+            const codeAtEOA = await provider.getCode(await delegator.getAddress());
             expect(codeAtEOA).to.equal(ethers.concat([ACCOUNT_CODE_PREFIX, await clearStorageHelper.getAddress()]));
 
             const clearAccountStorage = await ethers.getContractAt("ClearStorageHelper", await delegator.getAddress());
@@ -163,14 +173,15 @@ describe("EIP7702", () => {
                 await setupTests();
             const pkDelegator = process.env.PK3 || "";
             const pkRelayer = process.env.PK2 || "";
+            const provider = ethers.provider;
 
-            const delegatorWallet = new ethers.Wallet(pkDelegator, hre.ethers.provider);
+            const delegatorWallet = new ethers.Wallet(pkDelegator, provider);
             const relayerSigningKey = new SigningKey(pkRelayer);
 
             const account = await delegatorWallet.getAddress();
             expect(account).to.equal(await delegator.getAddress());
 
-            const chainId = (await ethers.provider.getNetwork()).chainId;
+            const chainId = (await provider.getNetwork()).chainId;
             const authNonce = BigInt(await delegatorWallet.getNonce());
 
             // Deploy SafeProxy
@@ -186,17 +197,17 @@ describe("EIP7702", () => {
             );
 
             const proxyAddress = await calculateProxyAddress(safeEIP7702ProxyFactory, await safeSingleton.getAddress(), setupData, 0);
-            const isContract = (await ethers.provider.getCode(proxyAddress)) === "0x" ? false : true;
+            const isContract = (await provider.getCode(proxyAddress)) === "0x" ? false : true;
 
             if (!isContract) {
                 await safeEIP7702ProxyFactory.connect(deployer).createProxyWithNonce(await safeSingleton.getAddress(), setupData, 0);
             }
 
             const authorizationList = getAuthorizationList(chainId, authNonce, pkDelegator, proxyAddress);
-            const encodedSignedTx = await getSignedTransaction(ethers.provider, relayerSigningKey, authorizationList);
+            const encodedSignedTx = await getSignedTransaction(provider, relayerSigningKey, authorizationList);
 
-            const response = await ethers.provider.send("eth_sendRawTransaction", [encodedSignedTx]);
-            const txSetupDataReceipt = await (await ethers.provider.getTransaction(response))?.wait();
+            const response = await provider.send("eth_sendRawTransaction", [encodedSignedTx]);
+            const txSetupDataReceipt = await (await provider.getTransaction(response))?.wait();
             expect(txSetupDataReceipt?.status === 1, "Transaction failed");
             const setupTxResponse = await relayer.sendTransaction({ to: account, data: setupData });
             const txSetupReceipt = await setupTxResponse.wait();
